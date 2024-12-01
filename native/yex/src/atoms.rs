@@ -7,45 +7,45 @@ rustler::atoms! {
     encoding_exception,
     update_v1,
     update_v2,
+    nil,
 
+    // messages types
+    sync,
+    awareness,
+    auth,
+    query_awareness,
+    custom,
+    sync_step1,
+    sync_step2,
+    sync_update,
 
+    //awareness message types
+    awareness_update,
+    awareness_change,
 
-// messages types
-  sync,
-  awareness,
-  auth,
-  query_awareness,
-  custom,
-  sync_step1,
-  sync_step2,
-  sync_update,
+    insert,
+    delete,
+    retain,
+    attributes,
 
-  //awareness message types
-  awareness_update,
-  awareness_change,
+    // undo message types
+    capture_timeout,
 
-  insert,
-  delete,
-  retain,
-  attributes,
+    // Observer events
+    stack_item_added,    // for observe_item_added
+    stack_item_updated,  // for observe_item_updated  
+    stack_item_popped,   // for observe_item_popped
 
-  // undo message types
+    // Event kinds
+    undo,              // EventKind::Undo
+    redo,              // EventKind::Redo
 
-  // Observer events
-  stack_item_added,    // for observe_item_added
-  stack_item_updated,  // for observe_item_updated  
-  stack_item_popped,   // for observe_item_popped
-
-  // Event kinds
-  undo,              // EventKind::Undo
-  redo,              // EventKind::Redo
-
-  // Type identifiers for branches
-  text,
-  map,
-  array,
-  xml_element,
-  xml_fragment,
-  xml_text,
-  popped,
+    // Type identifiers for branches
+    text,
+    map,
+    array,
+    xml_element,
+    xml_fragment,
+    xml_text,
+    popped,
 }

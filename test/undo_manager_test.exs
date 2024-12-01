@@ -533,6 +533,7 @@ defmodule Yex.UndoManagerTest do
     # From docs: const undoManager = new Y.UndoManager(ytext)
     undo_manager = UndoManager.new(doc, text)
     assert %UndoManager{} = undo_manager
+    assert undo_manager.reference != nil
   end
 
   test "demonstrates exact stopCapturing behavior from docs", %{doc: doc, text: text} do
@@ -657,6 +658,78 @@ defmodule Yex.UndoManagerTest do
     end)
     UndoManager.undo(undo_manager)
     assert Text.to_string(text) == "" # tracked because CustomBinding is in tracked origins
+  end
+
+  test "can add and receive stack item added observer notifications", %{doc: doc, text: text} do
+    undo_manager = UndoManager.new(doc, text)
+    # Add ourselves as an observer
+    {:ok, _ref} = UndoManager.add_added_observer(undo_manager, self())
+
+    # Make a change that should trigger a notification
+    Text.insert(text, 0, "test")
+
+    # Wait for and verify the notification
+    assert_receive {:stack_item_added, stack_item_id}
+    assert is_binary(stack_item_id)
+  end
+
+  test "can add and receive stack item updated observer notifications", %{doc: doc, text: text} do
+    undo_manager = UndoManager.new(doc, text)
+    {:ok, _ref} = UndoManager.add_updated_observer(undo_manager, self())
+
+    # Make a change that will create a stack item
+    Text.insert(text, 0, "test")
+    Process.sleep(10) # Give time for the stack item to be created
+
+    # Verify we receive the update notification with default metadata
+    assert_receive {:stack_item_updated, %UndoManager.Event{
+      meta: nil,  # Initial metadata should be nil
+      stack_item_id: _id
+    }}
+  end
+
+  test "metadata is updated during observer callbacks" do
+    undo_manager = UndoManager.new(doc, text)
+
+    # Return new metadata instead of mutating
+    :ok = UndoManager.add_added_observer(manager, fn event ->
+      Map.put(event.meta, "test", "value")
+    end)
+
+    Text.insert(text, 0, "test")
+
+    assert_receive {:stack_item_added, %UndoManager.Event{
+      meta: %{"test" => "value"},
+      stack_item_id: _id
+    }}
+  end
+
+  test "metadata persists through undo/redo cycle", %{doc: doc, text: text} do
+    undo_manager = UndoManager.new(doc, text)
+    test_pid = self()
+
+    # Add observers for all events
+    {:ok, _} = UndoManager.add_added_observer(undo_manager, fn event ->
+      put_in(event.meta, %{"added" => "value"})
+    end)
+
+    {:ok, _} = UndoManager.add_popped_observer(undo_manager, fn event ->
+      put_in(event.meta, %{"popped" => "value"})
+    end)
+
+    # Make a change and verify added metadata
+    Text.insert(text, 0, "test")
+    assert_receive {:stack_item_added, %UndoManager.Event{
+      meta: %{"added" => "value"},
+      stack_item_id: id
+    }}
+
+    # Undo and verify popped metadata
+    UndoManager.undo(undo_manager)
+    assert_receive {:stack_item_popped, %UndoManager.Event{
+      meta: %{"popped" => "value"},
+      stack_item_id: ^id
+    }}
   end
 
 end

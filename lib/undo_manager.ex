@@ -1,174 +1,141 @@
-defmodule Yex.UndoManager.Options do
-  @moduledoc """
-  Options for creating an UndoManager.
-
-  * `:capture_timeout` - Time in milliseconds to wait before creating a new capture group
-  """
-  defstruct capture_timeout: 500  # Default from Yrs
-
-  @type t :: %__MODULE__{
-    capture_timeout: non_neg_integer()
-  }
-end
-
 defmodule Yex.UndoManager do
+  require Logger
   alias Yex.UndoManager.Options
 
-  @moduledoc """
-  Represents a Y.UndoManager instance.
-  """
+  @type t :: %__MODULE__{reference: reference()}
+  @type metadata :: %{required(String.t()) => term()} | nil
+
+  # Keep just the reference field since we no longer need pid
   defstruct [:reference]
 
-  @type t :: %__MODULE__{
-    reference: reference()
-  }
-
-  @doc """
-  Creates a new UndoManager for the given document and scope with default options.
-  The scope can be a Text, Array, or Map type.
-  """
   def new(doc, %Yex.Text{} = scope) do
+    Logger.debug("Creating new UndoManager for Text scope")
     new_with_options(doc, scope, %Options{})
   end
 
-  def new(doc, %Yex.Array{} = scope) do
-    new_with_options(doc, scope, %Options{})
-  end
+  def new(doc, %Yex.Array{} = scope), do: new_with_options(doc, scope, %Options{})
+  def new(doc, %Yex.Map{} = scope), do: new_with_options(doc, scope, %Options{})
 
-  def new(doc, %Yex.Map{} = scope) do
-    new_with_options(doc, scope, %Options{})
-  end
-
-  @doc """
-  Creates a new UndoManager with the given options.
-
-  ## Options
-
-  See `Yex.UndoManager.Options` for available options.
-  """
   def new_with_options(doc, %Yex.Text{} = scope, %Options{} = options) do
+    Logger.debug("Creating new UndoManager for Text scope")
+    Logger.debug("Creating UndoManager with options: #{inspect(options)}")
+
     case Yex.Nif.undo_manager_new_with_options(doc, {:text, scope}, options) do
-      {:ok, manager} -> manager
-      error -> error
+      {:ok, ref} ->
+        Logger.debug("Successfully created UndoManager with ref: #{inspect(ref)}")
+        %__MODULE__{reference: ref}
+      {:error, reason} ->
+        Logger.error("Failed to create UndoManager: #{inspect(reason)}")
+        raise "Failed to create UndoManager: #{inspect(reason)}"
+      other ->
+        Logger.error("Unexpected return from NIF: #{inspect(other)}")
+        raise "Unexpected return from NIF: #{inspect(other)}"
     end
   end
 
   def new_with_options(doc, %Yex.Array{} = scope, %Options{} = options) do
     case Yex.Nif.undo_manager_new_with_options(doc, {:array, scope}, options) do
-      {:ok, manager} -> manager
+      {:ok, manager} -> %__MODULE__{reference: manager.reference}
       error -> error
     end
   end
 
   def new_with_options(doc, %Yex.Map{} = scope, %Options{} = options) do
     case Yex.Nif.undo_manager_new_with_options(doc, {:map, scope}, options) do
-      {:ok, manager} -> manager
+      {:ok, manager} -> %__MODULE__{reference: manager.reference}
       error -> error
     end
   end
 
-  @doc """
-  Includes an origin to be tracked by the UndoManager.
-  """
-  def include_origin(undo_manager, origin) do
-    Yex.Nif.undo_manager_include_origin(undo_manager, origin)
+  # Direct NIF calls without GenServer
+  def include_origin(%__MODULE__{reference: ref}, origin) do
+    Logger.debug("Including origin: #{inspect(origin)}")
+    Yex.Nif.undo_manager_include_origin(ref, origin)
   end
+
+  def exclude_origin(%__MODULE__{reference: ref}, origin), do: Yex.Nif.undo_manager_exclude_origin(ref, origin)
+  def undo(%__MODULE__{reference: ref}) do
+    Logger.debug("Performing undo operation with ref: #{inspect(ref)}")
+    case Yex.Nif.undo_manager_undo(ref) do
+      {:ok, _} -> :ok
+      error ->
+        Logger.error("Undo operation failed with error: #{inspect(error)}")
+        raise "Undo operation failed: #{inspect(error)}"
+    end
+  end
+
+  def redo(%__MODULE__{reference: ref}), do: Yex.Nif.undo_manager_redo(ref)
+  def expand_scope(%__MODULE__{reference: ref}, scope), do: Yex.Nif.undo_manager_expand_scope(ref, scope)
+  def stop_capturing(%__MODULE__{reference: ref}), do: Yex.Nif.undo_manager_stop_capturing(ref)
+  def clear(%__MODULE__{reference: ref}), do: Yex.Nif.undo_manager_clear(ref)
 
   @doc """
-  Excludes an origin from being tracked by the UndoManager.
+  Adds an observer for stack item added events.
   """
-  def exclude_origin(undo_manager, origin) do
-    Yex.Nif.undo_manager_exclude_origin(undo_manager, origin)
-  end
-
-  @doc """
-  Undoes the last tracked change.
-  """
-  def undo(undo_manager) do
-    Yex.Nif.undo_manager_undo(undo_manager)
-  end
-
-  @doc """
-  Redoes the last undone change.
-  """
-  def redo(undo_manager) do
-    Yex.Nif.undo_manager_redo(undo_manager)
-  end
-
-  @doc """
-  Expands the scope of the UndoManager to include additional shared types.
-  The scope can be a Text, Array, or Map type.
-  """
-  def expand_scope(undo_manager, %Yex.Text{} = scope) do
-    Yex.Nif.undo_manager_expand_scope(undo_manager, {:text, scope})
-  end
-
-  def expand_scope(undo_manager, %Yex.Array{} = scope) do
-    Yex.Nif.undo_manager_expand_scope(undo_manager, {:array, scope})
-  end
-
-  def expand_scope(undo_manager, %Yex.Map{} = scope) do
-    Yex.Nif.undo_manager_expand_scope(undo_manager, {:map, scope})
+  @spec add_added_observer(%__MODULE__{}, pid()) :: :ok | {:error, term()}
+  def add_added_observer(%__MODULE__{reference: ref}, callback) when is_function(callback, 1) do
+    # Wrap the callback to return new metadata instead of mutating
+    observer = fn event ->
+      new_meta = callback.(event)
+      {:ok, new_meta}
+    end
+    Yex.Nif.undo_manager_add_added_observer(ref, observer)
   end
 
   @doc """
-  Stops capturing changes for the current stack item.
-  This ensures that the next change will create a new stack item instead of
-  being merged with the previous one, even if it occurs within the normal timeout window.
-
-  ## Example:
-      text = Doc.get_text(doc, "text")
-      undo_manager = UndoManager.new(doc, text)
-
-      Text.insert(text, 0, "a")
-      UndoManager.stop_capturing(undo_manager)
-      Text.insert(text, 1, "b")
-      UndoManager.undo(undo_manager)
-      # Text.to_string(text) will be "a" (only "b" was removed)
+  Adds an observer for stack item updated events.
   """
-  def stop_capturing(undo_manager) do
-    Yex.Nif.undo_manager_stop_capturing(undo_manager)
+  @spec add_updated_observer(%__MODULE__{}, pid()) :: :ok | {:error, term()}
+  def add_updated_observer(%__MODULE__{reference: ref}, observer_pid) do
+    Yex.Nif.undo_manager_add_updated_observer(ref, observer_pid)
   end
 
   @doc """
-  Adds an observer to the UndoManager that will receive callbacks when
-  stack items are added or popped.
-
-  ## Example:
-      defmodule MyObserver do
-        @behaviour Yex.UndoManager.Observer
-
-        def handle_stack_item_added(stack_item) do
-          {:ok, Map.put(stack_item.meta, :cursor_position, get_cursor_position())}
-        end
-
-        def handle_stack_item_popped(stack_item) do
-          restore_cursor_position(stack_item.meta.cursor_position)
-          :ok
-        end
-      end
-
-      undo_manager = UndoManager.new(doc, text)
-      UndoManager.add_observer(undo_manager, MyObserver)
+  Adds an observer for stack item popped events.
   """
-  def add_observer(undo_manager, observer) when is_atom(observer) do
-    {:ok, pid} = Yex.ObserverServer.start_link(undo_manager: undo_manager, module: observer)
-    pid
+  @spec add_popped_observer(%__MODULE__{}, pid()) :: :ok | {:error, term()}
+  def add_popped_observer(%__MODULE__{reference: ref}, observer_pid) do
+    Yex.Nif.undo_manager_add_popped_observer(ref, observer_pid)
   end
+end
 
-  @doc """
-  Clears all StackItems stored within current UndoManager, effectively resetting its state.
+defmodule Yex.UndoManager.Event do
+  @type t :: %__MODULE__{
+    meta: map(),
+    stack_item_id: integer()
+  }
 
-  ## Example:
-      text = Doc.get_text(doc, "text")
-      undo_manager = UndoManager.new(doc, text)
+  defstruct [:meta, :stack_item_id]
+end
 
-      Text.insert(text, 0, "Hello")
-      Text.insert(text, 5, " World")
-      UndoManager.clear(undo_manager)
-      # All undo/redo history is now cleared
-  """
-  def clear(undo_manager) do
-    Yex.Nif.undo_manager_clear(undo_manager)
+# Example usage in test
+defmodule Yex.UndoManagerTest do
+  use ExUnit.Case
+
+  test "handles metadata updates in event callbacks" do
+    doc = Yex.Doc.new()
+    text = Yex.Text.new(doc)
+    manager = Yex.UndoManager.new(doc, text)
+
+    test_pid = self()
+
+    # Add observer that updates metadata during the callback
+    :ok = Yex.UndoManager.add_added_observer(manager, fn event ->
+      # Update metadata directly in the callback
+      event.meta["test"] = "value"
+    end)
+
+    # Make a change that will trigger an event
+    Yex.Text.insert(text, 0, "abc")
+
+    # Verify the metadata was updated during the event
+    assert_receive {:stack_item_added, %Yex.UndoManager.Event{
+      stack_item_id: _id,
+      meta: %{"test" => "value"}
+    }}
   end
+end
+
+def handle_undo_event(pid, event_type, data) do
+  send(pid, {event_type, data})
 end
